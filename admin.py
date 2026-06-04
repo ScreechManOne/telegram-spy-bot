@@ -77,10 +77,16 @@ def setup_admin(dp: Dispatcher) -> None:
         await callback.answer()
         try:
             stats = await database.get_admin_stats()
+            connections = await database.list_connections()
+            lines = [
+                f"• <code>{uid}</code>" for uid, _ in connections
+            ] or ["• нет подключений"]
             text = (
                 "📊 <b>Статистика</b>\n\n"
                 f"👥 Запускали бота: <b>{stats['total_users']}</b>\n"
-                f"🔗 Подключено сейчас: <b>{stats['connected_users']}</b>"
+                f"🔗 Подключено сейчас: <b>{stats['connected_users']}</b>\n\n"
+                "🆔 <b>User ID подключённых:</b>\n"
+                + "\n".join(lines)
             )
             await callback.message.edit_text(
                 text, parse_mode=ParseMode.HTML, reply_markup=admin_keyboard()

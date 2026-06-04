@@ -2,7 +2,7 @@ import aiosqlite
 import time
 
 DB_FILE = "database.db"
-MAX_GLOBAL_MESSAGES = 1000
+MAX_MESSAGES_PER_USER = 50000
 
 
 async def _table_columns(db, table: str) -> set[str]:
@@ -50,11 +50,17 @@ async def init_db():
                 last_seen REAL NOT NULL
             )
         ''')
+        await db.execute('''
+            DELETE FROM connections WHERE rowid NOT IN (
+                SELECT MAX(rowid) FROM connections GROUP BY user_id
+            )
+        ''')
         await db.commit()
 
 
 async def add_connection(connection_id: str, user_id: int):
     async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('DELETE FROM connections WHERE user_id = ?', (user_id,))
         await db.execute(
             'INSERT OR REPLACE INTO connections (business_connection_id, user_id) VALUES (?, ?)',
             (connection_id, user_id),
@@ -76,6 +82,24 @@ async def get_user_by_connection(connection_id: str) -> int | None:
         ) as cursor:
             row = await cursor.fetchone()
             return row[0] if row else None
+
+
+async def get_connection_for_user(user_id: int) -> str | None:
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute(
+            'SELECT business_connection_id FROM connections WHERE user_id = ?',
+            (user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else None
+
+
+async def list_connections() -> list[tuple[int, str]]:
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute(
+            'SELECT user_id, business_connection_id FROM connections ORDER BY user_id'
+        ) as cursor:
+            return await cursor.fetchall()
 
 
 async def save_message(
@@ -144,8 +168,16 @@ async def update_message_archive(connection_id: str, message_id: int, archive_me
 async def cleanup_db():
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute(f'''
-            DELETE FROM messages WHERE rowid NOT IN (
-                SELECT rowid FROM messages ORDER BY timestamp DESC LIMIT {MAX_GLOBAL_MESSAGES}
+            DELETE FROM messages WHERE rowid IN (
+                SELECT m.rowid FROM messages m
+                INNER JOIN connections c ON m.business_connection_id = c.business_connection_id
+                WHERE m.rowid NOT IN (
+                    SELECT m2.rowid FROM messages m2
+                    INNER JOIN connections c2 ON m2.business_connection_id = c2.business_connection_id
+                    WHERE c2.user_id = c.user_id
+                    ORDER BY m2.timestamp DESC
+                    LIMIT {MAX_MESSAGES_PER_USER}
+                )
             )
         ''')
         await db.commit()

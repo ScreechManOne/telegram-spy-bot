@@ -6,7 +6,8 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
-ARCHIVE_CHAT_ID = int(os.getenv("ARCHIVE_CHAT_ID", "-1004296785281"))
+_raw_archive = os.getenv("ARCHIVE_CHAT_ID", "").strip()
+ARCHIVE_CHAT_ID = int(_raw_archive) if _raw_archive else 0
 
 # Изменили уровень на WARNING, чтобы консоль не засорялась от каждого системного события Telegram
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s - %(levelname)s - %(name)s - %(message)s")

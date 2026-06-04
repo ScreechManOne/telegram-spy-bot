@@ -2,8 +2,8 @@ import asyncio
 from html import escape
 
 from aiogram import Bot, Dispatcher, Router
-from aiogram.types import BufferedInputFile, Message, BusinessMessagesDeleted, BusinessConnection
-from aiogram.filters import CommandStart
+from aiogram.types import Message, BusinessMessagesDeleted, BusinessConnection
+from aiogram.filters import Command, CommandStart
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
@@ -14,8 +14,11 @@ from media_archive import (
     ArchiveMeta,
     archive_message,
     copy_from_archive,
+    is_spoiler_media,
     should_archive,
     verify_archive_access,
+    send_photo_with_fallback,
+    send_video_with_fallback,
 )
 
 bot = Bot(token=BOT_TOKEN)
@@ -119,36 +122,72 @@ def build_archive_meta(
     )
 
 
-async def send_replied_media_to_user(user_id: int, replied: Message, chat_title: str) -> bool:
-    is_hidden = getattr(replied, "has_media_spoiler", False)
-    sender = get_sender_name(replied) if replied.from_user else "Неизвестный"
+async def deliver_secret_media(user_id: int, message: Message, chat_title: str) -> bool:
+    """Сохраняет спойлер- или одноразовое (огонёк) медиа в личку пользователя."""
+    sender = get_sender_name(message) if message.from_user else "Неизвестный"
     notice = build_hidden_media_saved_notice(chat_title, sender)
+    is_hidden = is_spoiler_media(message)
 
-    if replied.photo and is_hidden:
-        await bot.send_photo(
-            user_id,
-            replied.photo[-1].file_id,
-            caption=notice,
-            parse_mode=ParseMode.HTML,
-            has_spoiler=True,
-        )
-        return True
+    try:
+        if message.photo:
+            if is_hidden:
+                await send_photo_with_fallback(
+                    bot, user_id, message, caption=notice, parse_mode=ParseMode.HTML
+                )
+                return True
+            try:
+                msg = await bot.send_photo(user_id, message.photo[-1].file_id)
+                await bot.delete_message(user_id, msg.message_id)
+                return False
+            except Exception as e:
+                if "SelfDestructing" not in str(e):
+                    raise
+                await send_photo_with_fallback(
+                    bot, user_id, message, caption=notice, parse_mode=ParseMode.HTML
+                )
+                return True
 
-    if replied.photo:
-        return False
-
-    if replied.video and is_hidden:
-        await bot.send_video(
-            user_id, replied.video.file_id, caption=notice, parse_mode=ParseMode.HTML, has_spoiler=True
-        )
-        return True
-    if replied.voice and is_hidden:
-        await bot.send_voice(user_id, replied.voice.file_id, caption=notice, parse_mode=ParseMode.HTML)
-        return True
-    if replied.video_note and is_hidden:
-        await bot.send_video_note(user_id, replied.video_note.file_id)
-        await bot.send_message(user_id, notice, parse_mode=ParseMode.HTML)
-        return True
+        if message.video:
+            if is_hidden or getattr(message, "has_protected_content", False):
+                await send_video_with_fallback(
+                    bot, user_id, message, caption=notice, parse_mode=ParseMode.HTML
+                )
+                return True
+            try:
+                msg = await bot.send_video(user_id, message.video.file_id)
+            except Exception as e:
+                if "SelfDestructing" not in str(e):
+                    raise
+                await send_video_with_fallback(
+                    bot, user_id, message, caption=notice, parse_mode=ParseMode.HTML
+                )
+                return True
+            if getattr(msg, "has_protected_content", False):
+                await bot.send_message(user_id, notice, parse_mode=ParseMode.HTML)
+                return True
+            try:
+                duplicate = await bot.copy_message(
+                    chat_id=user_id,
+                    from_chat_id=user_id,
+                    message_id=msg.message_id,
+                )
+                await bot.delete_message(user_id, msg.message_id)
+                await bot.delete_message(user_id, duplicate.message_id)
+                return False
+            except Exception:
+                await bot.send_message(user_id, notice, parse_mode=ParseMode.HTML)
+                return True
+        if message.voice and is_hidden:
+            await bot.send_voice(
+                user_id, message.voice.file_id, caption=notice, parse_mode=ParseMode.HTML
+            )
+            return True
+        if message.video_note and is_hidden:
+            await bot.send_video_note(user_id, message.video_note.file_id)
+            await bot.send_message(user_id, notice, parse_mode=ParseMode.HTML)
+            return True
+    except Exception as e:
+        logger.error(f"Ошибка сохранения секретного медиа: {e}")
 
     return False
 
@@ -187,6 +226,37 @@ async def cmd_start(message: Message):
     await message.answer(text, parse_mode=ParseMode.HTML)
 
 
+@dp.message(Command("status"))
+async def cmd_status(message: Message):
+    if not message.from_user:
+        return
+
+    user_id = message.from_user.id
+    connection_id = await database.get_connection_for_user(user_id)
+
+    if connection_id:
+        text = (
+            "✅ <b>Business-подключение активно</b>\n\n"
+            f"🔗 ID сессии: <code>{connection_id[:16]}…</code>\n\n"
+            "Уведомления об изменениях и удалениях сообщений <b>собеседников</b> "
+            "приходят в этот чат с ботом.\n\n"
+            "<i>Свои правки и удаления не отслеживаются.</i>"
+        )
+    else:
+        text = (
+            "❌ <b>Business не подключён</b>\n\n"
+            "Сейчас бот не видит ваши переписки.\n\n"
+            "🔧 <b>Что сделать:</b>\n"
+            f"{blockquote(
+                '1. Настройки → Telegram для бизнеса → Чат-боты\n'
+                '2. Добавьте бота и включите переключатель\n'
+                '3. Выберите чаты для работы бота\n'
+                '4. Должно прийти сообщение «Бот подключён»'
+            )}"
+        )
+    await message.answer(text, parse_mode=ParseMode.HTML)
+
+
 @dp.business_connection()
 async def process_business_connection(connection: BusinessConnection):
     if connection.is_enabled:
@@ -202,7 +272,9 @@ async def process_business_connection(connection: BusinessConnection):
             f"{blockquote('Данные остаются в защищённой среде Telegram — только вы видите свои отчёты.')}",
             parse_mode=ParseMode.HTML,
         )
-        logger.info(f"Новое подключение Business API от пользователя ID: {user.id}")
+        logger.info(
+            f"Business подключён: user_id={user.id}, connection_id={connection.id}"
+        )
     else:
         await database.remove_connection(connection.id)
         await bot.send_message(
@@ -218,15 +290,25 @@ async def process_business_connection(connection: BusinessConnection):
 async def process_new_business_message(message: Message):
     user_id = await database.get_user_by_connection(message.business_connection_id)
     if not user_id:
+        logger.warning(
+            f"Пропуск business_message: неизвестный connection_id="
+            f"{message.business_connection_id}"
+        )
         return
 
     chat_title = message.chat.title or message.chat.full_name or "Личный чат"
     sender_name = get_sender_name(message)
 
+    if is_interlocutor_message(message, user_id):
+        try:
+            await deliver_secret_media(user_id, message, chat_title)
+        except Exception as e:
+            logger.error(f"Ошибка автосохранения секретного медиа: {e}")
+
     if message.reply_to_message and message.from_user and message.from_user.id == user_id:
         replied = message.reply_to_message
         try:
-            saved = await send_replied_media_to_user(user_id, replied, chat_title)
+            saved = await deliver_secret_media(user_id, replied, chat_title)
             if saved:
                 replied_sender = get_sender_name(replied) if replied.from_user else sender_name
                 archive_meta = ArchiveMeta(
