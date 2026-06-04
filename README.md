@@ -32,10 +32,10 @@ copy .env.example .env          # Windows
 # cp .env.example .env          # Linux/macOS
 ```
 
-Заполните `.env`, затем:
+Заполните `.env`, затем из **корня проекта**:
 
 ```bash
-python bot.py
+python -m spy_bot
 ```
 
 **Windows:** `scripts\run.bat` (консоль) или `scripts\start_background.vbs` (фон без окна).
@@ -55,7 +55,12 @@ python bot.py
 | `OWNER_ID` | Ваш числовой Telegram user id (админ, алерты об архиве) |
 | `ARCHIVE_CHAT_ID` | ID закрытой группы (`-100...`). Пусто = архивация отключена |
 
-Подробнее о безопасности: [SECURITY.md](SECURITY.md).
+## Безопасность
+
+- Не коммитьте `.env` и `database.db` — они в `.gitignore`.
+- При утечке токена отзовите его в BotFather и создайте новый.
+- Архив-группа должна быть закрытой; доступ только у вас.
+- Используйте бот законно и с согласия участников переписки, где это требуется.
 
 ## Команды
 
@@ -68,16 +73,21 @@ python bot.py
 ## Структура проекта
 
 ```
-├── bot.py              # Точка входа, Business-хендлеры
-├── config.py           # Конфиг из .env
-├── database.py         # SQLite (сообщения, подключения)
-├── media_archive.py    # Архив в Telegram-группу
-├── admin.py            # Панель администратора
-├── scripts/            # Запуск на Windows
+├── spy_bot/
+│   ├── __main__.py       # Точка входа (python -m spy_bot)
+│   ├── app.py            # Business-хендлеры и polling
+│   ├── config.py         # Конфиг из .env
+│   ├── database.py       # SQLite
+│   ├── media_archive.py  # Архив в Telegram-группу
+│   ├── admin.py          # Панель администратора
+│   └── paths.py          # Пути к корню проекта
+├── scripts/              # Запуск на Windows
 ├── requirements.txt
 ├── .env.example
-└── SECURITY.md
+└── README.md
 ```
+
+`database.db` создаётся в корне проекта при первом запуске.
 
 ## Disclaimer
 
@@ -89,4 +99,4 @@ python bot.py
 
 **Telegram Business bot** (Premium required) that notifies you when an **interlocutor** edits or deletes messages, archives media to a private group, and saves spoiler / view-once photo and video when possible.
 
-**Setup:** `pip install -r requirements.txt`, copy `.env.example` to `.env`, set `BOT_TOKEN`, `OWNER_ID`, `ARCHIVE_CHAT_ID`, run `python bot.py`. Connect via Telegram Business → Chat bots. Commands: `/start`, `/status`, `/admin` (owner only). See [SECURITY.md](SECURITY.md). Use responsibly and lawfully.
+**Setup:** `pip install -r requirements.txt`, copy `.env.example` to `.env`, set env vars, run `python -m spy_bot` from the project root. Connect via Telegram Business → Chat bots. Commands: `/start`, `/status`, `/admin` (owner only). Never commit secrets. Use responsibly and lawfully.

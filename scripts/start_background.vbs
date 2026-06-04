@@ -14,4 +14,4 @@ Else
     strPython = "python"
 End If
 
-objShell.Run "cmd /c """ & strPython & """ bot.py", 0, False
+objShell.Run "cmd /c """ & strPython & """ -m spy_bot", 0, False

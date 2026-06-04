@@ -4,7 +4,7 @@ from aiogram import Bot
 from aiogram.enums import ParseMode
 from aiogram.types import BufferedInputFile, Message
 
-from config import ARCHIVE_CHAT_ID, logger
+from .config import ARCHIVE_CHAT_ID, logger
 
 
 @dataclass

@@ -31,3 +31,6 @@ Thumbs.db
 
 # Cursor / local tooling
 .cursor/
+
+# Local security notes (not published)
+SECURITY.md

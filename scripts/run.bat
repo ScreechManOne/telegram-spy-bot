@@ -6,5 +6,5 @@ if exist ".venv\Scripts\activate.bat" (
 ) else if exist "venv\Scripts\activate.bat" (
     call venv\Scripts\activate
 )
-python bot.py
+python -m spy_bot
 pause

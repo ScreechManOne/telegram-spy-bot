@@ -1,7 +1,10 @@
-import aiosqlite
 import time
 
-DB_FILE = "database.db"
+import aiosqlite
+
+from .paths import PROJECT_ROOT
+
+DB_FILE = str(PROJECT_ROOT / "database.db")
 MAX_MESSAGES_PER_USER = 50000
 
 

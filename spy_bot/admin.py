@@ -7,8 +7,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from config import OWNER_ID, logger
-import database
+from . import database
+from .config import OWNER_ID, logger
 
 CB_STATS = "admin:stats"
 CB_BROADCAST = "admin:broadcast"

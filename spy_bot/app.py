@@ -1,4 +1,3 @@
-import asyncio
 from html import escape
 
 from aiogram import Bot, Dispatcher, Router
@@ -7,10 +6,10 @@ from aiogram.filters import Command, CommandStart
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from config import BOT_TOKEN, OWNER_ID, logger
-import database
-from admin import setup_admin
-from media_archive import (
+from . import database
+from .admin import setup_admin
+from .config import BOT_TOKEN, OWNER_ID, logger
+from .media_archive import (
     ArchiveMeta,
     archive_message,
     copy_from_archive,
@@ -461,7 +460,3 @@ async def main():
             "deleted_business_messages",
         ],
     )
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
