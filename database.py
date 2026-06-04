@@ -40,6 +40,16 @@ async def init_db():
         await _ensure_column(db, "messages", "media_file_id", "TEXT")
         await _ensure_column(db, "messages", "media_type", "TEXT")
         await _ensure_column(db, "messages", "archive_message_id", "INTEGER")
+        await _ensure_column(db, "messages", "sender_id", "INTEGER")
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS bot_users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                full_name TEXT,
+                first_seen REAL NOT NULL,
+                last_seen REAL NOT NULL
+            )
+        ''')
         await db.commit()
 
 
@@ -76,17 +86,18 @@ async def save_message(
     media_file_id: str | None = None,
     media_type: str | None = None,
     archive_message_id: int | None = None,
+    sender_id: int | None = None,
 ):
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute('''
             INSERT OR REPLACE INTO messages (
                 business_connection_id, message_id, text, sender_name, timestamp,
-                media_file_id, media_type, archive_message_id
+                media_file_id, media_type, archive_message_id, sender_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             connection_id, message_id, text, sender_name, time.time(),
-            media_file_id, media_type, archive_message_id,
+            media_file_id, media_type, archive_message_id, sender_id,
         ))
         await db.commit()
     await cleanup_db()
@@ -95,7 +106,7 @@ async def save_message(
 async def get_message(connection_id: str, message_id: int):
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute('''
-            SELECT text, sender_name, media_file_id, media_type, archive_message_id
+            SELECT text, sender_name, media_file_id, media_type, archive_message_id, sender_id
             FROM messages
             WHERE business_connection_id = ? AND message_id = ?
         ''', (connection_id, message_id)) as cursor:
@@ -107,6 +118,7 @@ async def get_message(connection_id: str, message_id: int):
                     "media_file_id": row[2],
                     "media_type": row[3],
                     "archive_message_id": row[4],
+                    "sender_id": row[5],
                 }
             return None
 
@@ -137,3 +149,33 @@ async def cleanup_db():
             )
         ''')
         await db.commit()
+
+
+async def register_bot_user(user_id: int, username: str | None, full_name: str | None):
+    now = time.time()
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('''
+            INSERT INTO bot_users (user_id, username, full_name, first_seen, last_seen)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username = excluded.username,
+                full_name = excluded.full_name,
+                last_seen = excluded.last_seen
+        ''', (user_id, username, full_name, now, now))
+        await db.commit()
+
+
+async def get_admin_stats() -> dict:
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT COUNT(*) FROM bot_users') as cursor:
+            total_users = (await cursor.fetchone())[0]
+        async with db.execute('SELECT COUNT(DISTINCT user_id) FROM connections') as cursor:
+            connected_users = (await cursor.fetchone())[0]
+    return {"total_users": total_users, "connected_users": connected_users}
+
+
+async def get_all_bot_user_ids() -> list[int]:
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT user_id FROM bot_users') as cursor:
+            rows = await cursor.fetchall()
+    return [row[0] for row in rows]

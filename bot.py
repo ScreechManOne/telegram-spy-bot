@@ -1,12 +1,15 @@
 import asyncio
+from html import escape
 
 from aiogram import Bot, Dispatcher, Router
 from aiogram.types import BufferedInputFile, Message, BusinessMessagesDeleted, BusinessConnection
 from aiogram.filters import CommandStart
 from aiogram.enums import ParseMode
+from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import BOT_TOKEN, OWNER_ID, logger
 import database
+from admin import setup_admin
 from media_archive import (
     ArchiveMeta,
     archive_message,
@@ -16,7 +19,7 @@ from media_archive import (
 )
 
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+dp = Dispatcher(storage=MemoryStorage())
 business_router = Router()
 
 
@@ -43,6 +46,15 @@ def get_message_content(message: Message) -> str:
     return text
 
 
+def get_sender_id(message: Message) -> int | None:
+    return message.from_user.id if message.from_user else None
+
+
+def is_interlocutor_message(message: Message, owner_id: int) -> bool:
+    sender_id = get_sender_id(message)
+    return sender_id is not None and sender_id != owner_id
+
+
 def get_sender_name(message: Message) -> str:
     if message.from_user and message.from_user.username:
         return f"@{message.from_user.username}"
@@ -59,6 +71,42 @@ def get_media_fallback(message: Message) -> tuple[str | None, str | None]:
     return None, None
 
 
+def blockquote(content: str) -> str:
+    return f"<blockquote>{escape(content)}</blockquote>"
+
+
+def fmt_chat_header(emoji: str, action: str, chat_title: str) -> str:
+    return f"{emoji} {action} <i>{escape(chat_title)}</i>"
+
+
+def fmt_sender_line(sender_name: str) -> str:
+    return f"👤 От: {sender_name}"
+
+
+def build_edit_report(chat_title: str, sender_name: str, old_text: str, new_text: str) -> str:
+    return (
+        f"{fmt_chat_header('✏️', 'Изменено сообщение в чате:', chat_title)}\n"
+        f"{fmt_sender_line(sender_name)}\n\n"
+        f"📝 <b>Было:</b>\n{blockquote(old_text)}\n\n"
+        f"🆕 <b>Стало:</b>\n{blockquote(new_text)}"
+    )
+
+
+def build_delete_report(chat_title: str, sender_name: str, content: str) -> str:
+    return (
+        f"{fmt_chat_header('🗑', 'Удалено сообщение в чате:', chat_title)}\n"
+        f"{fmt_sender_line(sender_name)}\n\n"
+        f"📝 <b>Содержимое:</b>\n{blockquote(content)}"
+    )
+
+
+def build_hidden_media_saved_notice(chat_title: str, sender_name: str) -> str:
+    return (
+        f"{fmt_chat_header('💾', 'Сохранено одноразовое медиа в чате:', chat_title)}\n"
+        f"{fmt_sender_line(sender_name)}"
+    )
+
+
 def build_archive_meta(
     message: Message, user_id: int, chat_title: str, sender_name: str
 ) -> ArchiveMeta:
@@ -71,44 +119,35 @@ def build_archive_meta(
     )
 
 
-def build_hidden_media_saved_notice(replied: Message) -> str:
-    sender = get_sender_name(replied) if replied.from_user else "Неизвестный"
-    return f"Сохранено одноразовое медиа из чата\n-{sender}"
-
-
-async def send_replied_media_to_user(user_id: int, replied: Message) -> bool:
+async def send_replied_media_to_user(user_id: int, replied: Message, chat_title: str) -> bool:
     is_hidden = getattr(replied, "has_media_spoiler", False)
-    notice = build_hidden_media_saved_notice(replied)
+    sender = get_sender_name(replied) if replied.from_user else "Неизвестный"
+    notice = build_hidden_media_saved_notice(chat_title, sender)
+
+    if replied.photo and is_hidden:
+        await bot.send_photo(
+            user_id,
+            replied.photo[-1].file_id,
+            caption=notice,
+            parse_mode=ParseMode.HTML,
+            has_spoiler=True,
+        )
+        return True
 
     if replied.photo:
-        try:
-            msg = await bot.send_photo(
-                user_id,
-                replied.photo[-1].file_id,
-                caption=notice if is_hidden else None,
-                has_spoiler=is_hidden,
-            )
-            if not is_hidden:
-                await bot.delete_message(user_id, msg.message_id)
-                return False
-            return True
-        except Exception as e:
-            if "SelfDestructingPhoto" in str(e):
-                file_info = await bot.get_file(replied.photo[-1].file_id)
-                downloaded = await bot.download_file(file_info.file_path)
-                input_photo = BufferedInputFile(downloaded.read(), filename="photo.jpg")
-                await bot.send_photo(user_id, input_photo, caption=notice)
-                return True
-            raise
-    elif replied.video and is_hidden:
-        await bot.send_video(user_id, replied.video.file_id, caption=notice, has_spoiler=True)
+        return False
+
+    if replied.video and is_hidden:
+        await bot.send_video(
+            user_id, replied.video.file_id, caption=notice, parse_mode=ParseMode.HTML, has_spoiler=True
+        )
         return True
-    elif replied.voice and is_hidden:
-        await bot.send_voice(user_id, replied.voice.file_id, caption=notice)
+    if replied.voice and is_hidden:
+        await bot.send_voice(user_id, replied.voice.file_id, caption=notice, parse_mode=ParseMode.HTML)
         return True
-    elif replied.video_note and is_hidden:
+    if replied.video_note and is_hidden:
         await bot.send_video_note(user_id, replied.video_note.file_id)
-        await bot.send_message(user_id, notice)
+        await bot.send_message(user_id, notice, parse_mode=ParseMode.HTML)
         return True
 
     return False
@@ -116,28 +155,34 @@ async def send_replied_media_to_user(user_id: int, replied: Message) -> bool:
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
+    if message.from_user:
+        await database.register_bot_user(
+            message.from_user.id,
+            message.from_user.username,
+            message.from_user.full_name,
+        )
+
     me = await bot.get_me()
     bot_username = f"@{me.username}" if me.username else "username бота из описания"
 
     text = (
         "👋 <b>Добро пожаловать!</b>\n\n"
-        "Этот бот помогает не терять важное из переписок:\n"
-        "• уведомляет, если сообщение изменили или удалили;\n"
-        "• присылает, что было в сообщении раньше — текст и медиа.\n\n"
-        "<b>Как подключить бота к аккаунту</b>\n"
-        "<i>(нужен Telegram Premium)</i>\n\n"
-        "1. Откройте <b>Настройки</b> Telegram\n"
-        "2. Перейдите в <b>Telegram для бизнеса</b>\n"
-        "3. Выберите <b>Чат-боты</b> → <b>Добавить бота</b>\n"
-        f"4. Введите {bot_username} и подтвердите добавление\n"
-        "5. Включите бота переключателем и при необходимости укажите, "
-        "в каких чатах он может работать\n"
-        "6. После подключения вы получите сообщение от бота в этот чат — "
-        "значит всё готово\n\n"
-        "🔒 Данные обрабатываются через защищённую инфраструктуру Telegram.\n"
-        "Переписки шифруются на вашем устройстве и в мессенджере — "
-        "посторонние не имеют к ним доступа.\n"
-        "Бот работает только с вашим аккаунтом после подключения."
+        "📋 <b>Возможности:</b>\n"
+        f"{blockquote('• уведомляет, если сообщение изменили или удалили\n• присылает, что было в сообщении раньше — текст и медиа')}\n\n"
+        "🔧 <b>Как подключить бота</b> <i>(нужен Telegram Premium)</i>\n"
+        f"{blockquote(
+            '1. Настройки → Telegram для бизнеса\n'
+            '2. Чат-боты → Добавить бота\n'
+            f'3. Введите {bot_username} и подтвердите\n'
+            '4. Включите бота и выберите нужные чаты\n'
+            '5. Дождитесь сообщения от бота — значит, всё готово'
+        )}\n\n"
+        "🔒 <b>Безопасность:</b>\n"
+        f"{blockquote(
+            'Данные обрабатываются через защищённую инфраструктуру Telegram. '
+            'Переписки шифруются на вашем устройстве и в мессенджере. '
+            'Бот работает только с вашим аккаунтом после подключения.'
+        )}"
     )
     await message.answer(text, parse_mode=ParseMode.HTML)
 
@@ -145,20 +190,26 @@ async def cmd_start(message: Message):
 @dp.business_connection()
 async def process_business_connection(connection: BusinessConnection):
     if connection.is_enabled:
-        await database.add_connection(connection.id, connection.user.id)
+        user = connection.user
+        await database.register_bot_user(user.id, user.username, user.full_name)
+        await database.add_connection(connection.id, user.id)
         await bot.send_message(
             connection.user.id,
-            "✅ <b>Бот подключён и готов работать.</b>\n\n"
-            "Вы будете получать уведомления об изменённых и удалённых сообщениях прямо сюда.\n"
-            "🔒 Данные остаются в защищённой среде Telegram — только вы видите свои отчёты.",
+            "✅ <b>Бот подключён</b>\n\n"
+            "📬 <b>Уведомления:</b>\n"
+            f"{blockquote('Изменённые и удалённые сообщения будут приходить прямо сюда.')}\n\n"
+            "🔒 <b>Конфиденциальность:</b>\n"
+            f"{blockquote('Данные остаются в защищённой среде Telegram — только вы видите свои отчёты.')}",
             parse_mode=ParseMode.HTML,
         )
-        logger.info(f"Новое подключение Business API от пользователя ID: {connection.user.id}")
+        logger.info(f"Новое подключение Business API от пользователя ID: {user.id}")
     else:
         await database.remove_connection(connection.id)
         await bot.send_message(
             connection.user.id,
-            "Бот отключён от вашего аккаунта. Уведомления больше не приходят.",
+            "❌ <b>Бот отключён</b>\n\n"
+            "📭 <b>Статус:</b>\n"
+            f"{blockquote('Уведомления больше не приходят.')}",
             parse_mode=ParseMode.HTML,
         )
 
@@ -175,27 +226,27 @@ async def process_new_business_message(message: Message):
     if message.reply_to_message and message.from_user and message.from_user.id == user_id:
         replied = message.reply_to_message
         try:
-            await send_replied_media_to_user(user_id, replied)
-
-            replied_sender = get_sender_name(replied) if replied.from_user else sender_name
-            archive_meta = ArchiveMeta(
-                owner_id=user_id,
-                chat_title=chat_title,
-                sender_name=replied_sender,
-                connection_id=message.business_connection_id,
-                message_id=replied.message_id,
-            )
-            archive_msg_id = await archive_message(bot, replied, archive_meta)
-            if archive_msg_id:
-                existing = await database.get_message(
-                    message.business_connection_id, replied.message_id
+            saved = await send_replied_media_to_user(user_id, replied, chat_title)
+            if saved:
+                replied_sender = get_sender_name(replied) if replied.from_user else sender_name
+                archive_meta = ArchiveMeta(
+                    owner_id=user_id,
+                    chat_title=chat_title,
+                    sender_name=replied_sender,
+                    connection_id=message.business_connection_id,
+                    message_id=replied.message_id,
                 )
-                if existing:
-                    await database.update_message_archive(
-                        message.business_connection_id,
-                        replied.message_id,
-                        archive_msg_id,
+                archive_msg_id = await archive_message(bot, replied, archive_meta)
+                if archive_msg_id:
+                    existing = await database.get_message(
+                        message.business_connection_id, replied.message_id
                     )
+                    if existing:
+                        await database.update_message_archive(
+                            message.business_connection_id,
+                            replied.message_id,
+                            archive_msg_id,
+                        )
         except Exception as e:
             logger.error(f"Ошибка обработки reply-медиа: {e}")
 
@@ -207,6 +258,7 @@ async def process_new_business_message(message: Message):
 
     media_file_id, media_type = get_media_fallback(message)
     content = get_message_content(message)
+    sender_id = get_sender_id(message)
 
     await database.save_message(
         connection_id=message.business_connection_id,
@@ -216,6 +268,7 @@ async def process_new_business_message(message: Message):
         media_file_id=media_file_id,
         media_type=media_type,
         archive_message_id=archive_msg_id,
+        sender_id=sender_id,
     )
 
 
@@ -228,18 +281,15 @@ async def process_edited_business_message(message: Message):
     new_content = get_message_content(message)
     old_msg = await database.get_message(message.business_connection_id, message.message_id)
     sender_name = get_sender_name(message)
+    sender_id = get_sender_id(message)
     chat_title = message.chat.title or message.chat.full_name or "Личный чат"
 
     if old_msg:
         old_text = old_msg["text"]
         if old_text != new_content:
-            report = (
-                f"✏️ <b>Изменено сообщение</b> в чате: <i>{chat_title}</i>\n"
-                f"👤 От: <b>{sender_name}</b>\n\n"
-                f"📝 <b>Было:</b>\n<blockquote>{old_text}</blockquote>\n\n"
-                f"🆕 <b>Стало:</b>\n<blockquote>{new_content}</blockquote>"
-            )
-            await bot.send_message(user_id, report, parse_mode=ParseMode.HTML)
+            if is_interlocutor_message(message, user_id):
+                report = build_edit_report(chat_title, sender_name, old_text, new_content)
+                await bot.send_message(user_id, report, parse_mode=ParseMode.HTML)
             await database.update_message(message.business_connection_id, message.message_id, new_content)
     else:
         await database.save_message(
@@ -247,6 +297,7 @@ async def process_edited_business_message(message: Message):
             message_id=message.message_id,
             text=new_content,
             sender_name=sender_name,
+            sender_id=sender_id,
         )
 
 
@@ -265,15 +316,15 @@ async def process_deleted_business_messages(deleted: BusinessMessagesDeleted):
 
         old_text = old_msg["text"]
         sender_name = old_msg["sender_name"]
+        sender_id = old_msg.get("sender_id")
         media_file_id = old_msg["media_file_id"]
         media_type = old_msg["media_type"]
         archive_message_id = old_msg["archive_message_id"]
 
-        report = (
-            f"🗑 <b>Удалено сообщение</b> в чате: <i>{chat_title}</i>\n"
-            f"👤 От: <b>{sender_name}</b>\n\n"
-            f"📝 <b>Удаленный текст/медиа:</b>\n<blockquote>{old_text}</blockquote>"
-        )
+        if sender_id == user_id:
+            continue
+
+        report = build_delete_report(chat_title, sender_name, old_text)
 
         if archive_message_id:
             try:
@@ -313,10 +364,21 @@ async def main():
             pass
 
     logger.info("Бот запущен. Ожидание событий для всех подключенных пользователей...")
+    setup_admin(dp)
     dp.include_router(business_router)
 
     await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+    await dp.start_polling(
+        bot,
+        allowed_updates=[
+            "message",
+            "callback_query",
+            "business_connection",
+            "business_message",
+            "edited_business_message",
+            "deleted_business_messages",
+        ],
+    )
 
 
 if __name__ == "__main__":
